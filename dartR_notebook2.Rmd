@@ -1,0 +1,2293 @@
+
+---
+title: "DartR population genetic analysis"
+author: "Stephanie Todd"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  html_document: default
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+knit: (function(input, ...) {rmarkdown::render(input, output_file=paste0(rprojroot::find_rstudio_root_file(), "/html/dartR_notebook2_", format(Sys.Date(), "%Y-%B-%d"), ".html"))}) 
+code_folding: hide
+
+---
+```{r}
+
+datcode = "6213_110_HWE"  # version used for manuscript
+dat_descr = "new data same QC as 100pc filt, duplicates removed, HWE BonSig loci removed"
+
+
+if (!exists("datcode")) {            
+  datcode <- "6213_110_HWE"
+  dat_descr <- "new data same QC as 100pc filt, duplicates removed"
+}
+
+```
+
+`r paste("DartR", datcode, dat_descr, sep = " - ")`
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+# Sys.setenv(PATH = paste(Sys.getenv("PATH"), "C:\\Users\\steph\\AppData\\Local\\Programs\\MikTex 2.9\\miktex\\bin", sep=.Platform$path.sep))
+
+```
+
+
+
+```{r import packages, message=FALSE, results='hide',include=FALSE}
+
+# Load packages---------------------
+library(dartR)
+library(StAMPP)
+library(ggplot2)
+# # library(plyr)
+library(adegenet)
+library(igraph)
+library(tidyr)
+library(reshape2)
+library(rstatix)
+library(nparcomp)
+library(pegas)
+library(diveRsity)
+library(stringr)
+#library(viridis)  # requires package raster, which interferes with dplyr
+library(hierfstat)
+library(FinePop2)
+library(poppr)
+#library(dplyr)
+library(tidyverse)
+library(magrittr)
+library(pipeR)
+library(SOAR)
+
+
+
+```
+
+# Settings
+
+```{r Settings and import data and packages, message=FALSE, results='hide', echo=FALSE}
+
+# to do: 
+#   fix up flags so can rerun analyses regardless if the output already exists  
+#   fix up ldav iterations/functions
+
+
+# Flags - Sections to run:
+plot.AR_rareboot         = F
+run.indist              = F # WARNING takes several hours to run!!
+run.mappinggi           = T # broken dependancies req for seppop(mapping_gi) etc if FALSE
+run.LwrDav              = F
+run.grm_network_pops    = F
+run.grm_network_all     = F
+
+plot.Fis_hist           = T
+plot.Fis_box            = T
+
+open.Wahuld_effects     = F
+open.callrate_Fis_corr  = F
+
+rerun.Fst               = F
+rerun.AR_rareboot       = F
+rerun.testHWE           = T
+do.write_csvs          = F
+
+# Load functions: -----------------------------------------------------
+source("functions/Functions_dartR_notebook.R")
+source("functions/fn_gl_diversit_edited.R")
+source("functions/fn_gl_report_HWE_edited.R") # tried to avoid printing df of every single locus but ran into other errors and couldnt get it to work
+source("functions/fn_read_genepop.R")
+source("functions/fn_NeLD.R")
+source("functions/fn_dist2list.R")
+source("C:/Users/steph/Documents/R/Rfunctions.R")
+source("functions/fn_gl_pcoa_plot_edited.R")
+
+# import data, and create global variables -----------------
+source("scripts/02_global_variables_dartR.R")
+# file.edit("global_variables_dartR.R")
+#  file.edit('README.R') # open file with nameing system descriptions etc
+# file.edit("Functions_dartR_notebook.R")
+    
+# swtich off functions that cant be run with 'reassn' becasue they require 'slots'
+#use_reassn = grepl("reassn", datcode)
+
+```
+
+
+```{r subset data, message=FALSE, results='hide',include=FALSE}
+
+# pops_gls recalculate metrics first time - remove monomorphic loci
+run_if_first(outname = "popsgls_recalc", fn = "sapply", argsls = list(popsgls, "FUN" = gl.recalc.metrics, "mono.rm" = T), overwrite = F)
+
+
+# # filter maf within each population (using "recalc" nessecary for "reassn" dataset in order to fill empty slots)
+#   popsgls_mafpop <- lapply(popsgls_recalc, filt.maf.pop)
+#   save(popsgls_mafpop, file = paste(Rflder, "popsgls_mafpop.Rdata", sep = "/"))
+# 
+# 
+# # write mafpop to csv for use in colab
+#   for(pop in 2:4) { # Spurgeon broken (all NAs becasue no loci have >0.13 MAF?)
+#    mafpopdf <- as.data.frame(popsgls_mafpop[[pop]])
+#    write.csv(mafpopdf, file = paste0(Rflder, "/", popabv[pop], "df_mafpop", Vsfx, ".csv"))
+#   }
+  
+### === Convert mappinggl to Genid object ===================================
+run_if_first(outname = "mapping_gi", fn = "gl2gi", argsls = list(mappinggl))
+
+
+## ==== subset genid object mapping_gi into list of populaton genids (used in calculating Fis) ==
+  gi_popnames <- getobjnames.popprefix(objsufix = "_gi", popabv) # get oject names
+  
+  for (popindex in 1:length(Population)) {
+    pop_gi  <-seppop(mapping_gi)[[Population[popindex]]]
+    gi_name <- gi_popnames[popindex]
+    assign(gi_name, pop_gi) 
+   # print(pop_gi)  # optional to print summary of gl objects created
+  }
+  
+  # create list of genids 
+    pop_gi_ls <- list(sp_gi, dav_gi, emu_gi, tin_gi)  # Lower Davies here
+  
+```
+
+
+```{r define other global variables, message=FALSE, include=FALSE}
+# === DEFINE GLOBAL VARIABLES - Part B====
+     
+  # create named list of number of bettongs sampled in each pop
+     samplesize <- c()
+     for (pop in 1:4) {
+       n <- length(popsgls[[pop]]$ind.names)
+       samplesize <- c(samplesize, n)
+     }
+    names(samplesize) <- Population 
+    print(samplesize)
+    
+    
+  # average number of bettongs per locus (less than samplesize due to missing data)
+    Hodf <- gl.report.heterozygosity.edited2(mappinggl)
+    indperloc_avg <- Hodf$freq
+    names(indperloc_avg) <- Hodf$names
+    
+    indperloc_avg <- indperloc_avg[c("Spurgeon", "Davies.Creek", "Emu.Creek", "Tinaroo")] # rearrange to correct order 
+    names(indperloc_avg) <- Population  # replace dot with space
+    
+```
+# Data summary
+
+Transition to transversion ratio
+
+  Not all SNP mutations are equally likley to occur: Transitions (changes from C<>T or A<>G) are more likley to occur than Transversions (changes from C<>A/G or T<>A/G), because transversions are more likley to alter the amino acid coded in active regions of the genome. 
+ 
+ Across the genome the ts/tv ratio is expected to be approximately two, however it is usually above 3 in coding regions. 
+
+  Good indication the data is representative that its close to two
+
+see: http://rosalind.info/glossary/transitiontransversion-ratio/ 
+https://genome.sph.umich.edu/wiki/SNP_Call_Set_Properties
+Rosenberg et al_2003_Patterns of Transitional Mutation Biases Within and Among Mammalian Genomes.pdf
+
+```{r data summary}
+
+# data summary - full dataset
+print(mappinggl)
+
+cat("\n", "All populations (mappinggl) TV:TS","\n")
+ bases_all <- gl.report.bases(mappinggl, plot.out = FALSE, verbose = 0)
+
+
+# sample sizes and loci of populations
+cat("\n /// Population summary /// ")
+monoloc <- c()
+for (pop in 1:length(Population)) {
+  cat("\n", Population[pop], "----" , 
+      "\n Sample size: ", nInd(popsgls[[pop]]))
+  monoloc[pop] <- gl.report.monomorphs.edited(popsgls[[pop]])  
+}
+
+```
+
+### MAF
+Minor allele frequencies
+```{r minor allele frequencies, message=FALSE, fig.height = 7, fig.width = 9}
+
+gl.report.maf(mappinggl, v=0)
+
+```
+
+# Differentiation & structure
+
+### Private/fixed alleles
+
+fixed = mutually exclusive
+private = uni directionally exlusive (pop A has all the alleles present in pop B, but not visa versa)
+mdf = the absolute mean allele frequendy difference between loci
+
+```{r Report private/fixed alleles by pop}
+pa <- gl.report.pa(mappinggl)
+
+print(pa)
+write.csv(pa, paste0("output/private_and_fixed", Vsfx, ".csv"))
+
+if (run.LwrDav) {
+  pa <- gl.report.pa(mappinggl_ldav)
+  write.csv(pa, paste0("output/private_and_fixed_ldav", Vsfx, ".csv"))
+}
+# SPurgeon to LR comparison
+gl.report.pa(mappingglLR)
+pa_one2rest <- gl.report.pa(mappinggl, method = "one2rest")
+print(pa_one2rest)
+write_csv(pa_one2rest)
+
+# combine Emu and Tinaroo as Tinaroo
+tempgl <- mappinggl
+pop(tempgl) <- gsub("Emu Creek", "Tinaroo", pop(mappinggl)) %>% 
+  factor(., levels = c("Spurgeon", "Davies Creek", "Tinaroo"))
+
+pa_one2rest_3pop <- gl.report.pa(tempgl, method = "one2rest")
+print(pa_one2rest_3pop)
+write_csv(pa_one2rest_3pop)
+
+```
+
+### rarefied Private / fixed alleles
+```{r rarefied Private / fixed alleles bootstrapping, include=F}
+#run_if_first(outname = "AlleleRich_rareboot", fn = , overwrite = rerun)
+if(!file.exists(file = paste(Rflder, "PrivFix_rareboot100.Rdata", sep = "/"))) {  # runs the first time or if rerun flag is true
+  
+      PrivFix_rareboot <- c()  # rareboot = rareified bootstrapping
+      for (i in 1:100) {
+        rarePA <- rarefy.gls.CalcPrivFix(popsgls)
+        rarePA$rep <- i
+        PrivFix_rareboot <- rbind(PrivFix_rareboot, rarePA)
+      }
+
+      save(PrivFix_rareboot, file = paste(Rflder, "PrivFix_rareboot100.Rdata", sep = "/"))
+}
+
+load(file = paste(Rflder, "PrivFix_rareboot100.Rdata", sep = "/"))   # read back in
+```
+
+
+```{r summarise rarefied Private / fixed alleles}
+
+PrivFix_rareboot_summ <- PrivFix_rareboot %>%
+  group_by(pop1, pop2)  %>%
+  summarise(mean_fixed = mean(fixed),
+            sd_fixed = sd(fixed),
+            mean_priv1 = mean(priv1),
+            sd_priv1 = sd(priv1),
+            mean_priv2 = mean(priv2),
+            sd_priv2 = mean(priv2),
+            mean_total_priv = mean(totalpriv),
+            sd_total_priv = sd(totalpriv),
+            mean_AFD = mean(AFD),
+            sd_AFD = sd(AFD))
+write_csv(PrivFix_rareboot_summ)
+```
+
+### Genetic population dist
+
+```{r Report Pairwise genetic distance of populations}
+### uncomment to run #####
+# # Distance "pcfixed" calculates the pair-wise count of fixed allelic differences between populations.
+# # Distance "pa" tallies the total number of private alleles possessed by one or the other population.
+# # method =  "chao"could be Sorensen Index? Chao etal 2014
+
+run_if_first(outname = "dist_all", fn = "run_all_opts", argsls = list(mappinggl, "fn" = gl.dist.pop, 
+                                                                      "arg_opts" = c("euclidean", "nei", "reynolds")))
+
+for (i in 1:length(dist_all)) {
+  assign(paste0(names(dist_all)[i], "_dist"), as.vector(dist_all[[i]]))
+}
+
+dist_all_df <-  cbind.data.frame(euclidean = euclidean_dist, 
+                                 nei   = nei_dist, 
+                                 reynolds      = reynolds_dist)
+
+row.names(dist_all_df) <- c("Davies_Emu", "Davies_Spurgeon", "Davies_Tinaroo", "Emu_Spurgeon", "Emu_Tinaroo", "Spurgeon_Tinaroo")
+print(dist_all_df)
+
+```
+
+### PCA 
+Visualise structure of individuals within populations along ordination axes
+  
+```{r run PCoA, include=FALSE}
+# run.LwrDav = T # no longer needed?
+run_if_first(outname = "mapping_pca", fn = "gl.pcoa", argsls = list(mappinggl, "nfactors" = 4))
+run_if_first(outname = "mapping_ldav_pca", fn = "gl.pcoa", argsls = list(mappinggl_ldav, "nfactors" = 4))
+# mapping_pca <- mapping_PCA
+# save(mapping_pca, file = paste0(Rflder, "/mapping_pca.Rdata"))
+
+
+##  create plot objects of the PCA results - ignore plots immediately following
+p2  <- gl.pcoa.plot(mapping_pca, mappinggl, pop.labels="pop", xaxis=1, yaxis=2, scale = F,  save2tmp =T)
+p  <- gl.pcoa.plot_edited(mapping_ldav_pca, mappinggl_ldav, pop.labels="pop", xaxis=1, yaxis=2, scale = F, ellipse = F, save2tmp = F)
+
+
+```
+
+
+
+
+```{r plot PCA, fig.height = 7, fig.width = 7}
+
+# just plotting with lower davies as thats whats used in paper
+
+# plot for notebook output
+p + 
+  scale_colour_manual(values = popcol3_ldav) +
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), legend.position = "none") # + 
+ # stat_ellipse(type = "norm", level = 0.95)
+
+
+jpeg()
+# plot for jpg output
+png(paste0("plots/PCA_ldav_", Sys.Date(), ".png"), width = 5, height = 5, units = 'in', res = 600)
+p + 
+  scale_colour_manual(values = popcol3_ldav) +
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), legend.position = "none")
+# to plot the percentage of variation that is represented by the compoment axies:
+dev.off()
+
+jpeg(paste0("plots/PCA_ldav_bar_", Sys.Date(), ".jpg"), width = 9, height = 5, units = 'in', res = 600)
+barplot(mapping_pca$eig/sum(mapping_pca$eig)*100, )  # not that informative
+dev.off() 
+
+
+```
+
+ 
+### Fst 
+Fixation Index - structure between populations vs. structure within populations
+
+Fixation indices (FST) were estimated according to the method proposed by Wright (1949) and updated by Weir and Cockerham (1984), using R package StAMPP (Pembleton et al. 2013) with 10,000 bootstrap permutations. 
+      
+```{r Calculate Global Fst}
+### uncomment chunk to run first time ##
+
+#  Fst calculation using package StAMPP. returnts an object list with 3 mtx/df elements : Fsts, Pvalues & Bootstraps
+run_if_first(outname = "mapping_fst", fn = "stamppFst", argsls = list(mappinggl, "nboots"=10000, "percent"=95, "nclusters"=3),
+             overwrite = rerun.Fst)
+
+# subset output list to 'Bootstrap' df, then subset to summary cols
+Fst_Results <- mapping_fst$Bootstraps[,c("Population1","Population2", 
+                                         "Lower bound CI limit", "Upper bound CI limit", 
+                                         "p-value","Fst")] 
+print(Fst_Results)
+write_csv(Fst_Results)
+
+
+if (run.LwrDav) {
+  run_if_first(outname = "mapping_ldav_fst", fn = "stamppFst", argsls = list(mappinggl_ldav, "nboots"=10000, "percent"=95, "nclusters"=3))
+  
+  Fst_Results_ldav <- mapping_ldav_fst$Bootstraps[,c("Population1","Population2",        
+                                         "Lower bound CI limit", "Upper bound CI limit", 
+                                         "p-value","Fst")] 
+  print(Fst_Results_ldav)
+  write_csv(Fst_Results_ldav)
+
+}
+```
+
+### Gst
+using FinePop2 (v0.4) to calculate Nei and Chesser’s bias-corrected GST (global Fst)
+(Kitada et al. 2017)
+
+```{r Calculate Gst}
+mapping_gen <- read.GENEPOP_edited("data/mapping_genpop_6213_110_HWE2.gen", popname = "data/popnames.txt")
+#View(mapping_gen$genotype)
+
+Gst <- pop_pairwiseFST(mapping_gen)
+print(Gst)
+Gstl <- dist2list(Gst)
+write_csv(Gstl)
+
+
+# library(FinePop)
+# mapping_gen2 <- read.GENEPOP_edited2("data/mapping_genpop_6213_110_HWE2.gen", popname = "data/popnames.txt")
+# 
+# # max(popdata$nalleles) 
+# Gst2 <- GstNC(mapping_gen)
+# 
+# mapping_gen$num_allele
+
+
+```
+http://rstudio-pubs-static.s3.amazonaws.com/12475_c81fc78c66324a40b1509ee7ce3a15f6.html
+
+```{r Calculate Gst - 2}
+
+# # load diveRsity
+# library(diveRsity)
+# # run fastDivPart on "Test_data" (1000 bootstraps)
+# data(Test_data)
+# 
+# pwDiff <- fastDivPart("data/mapping_genpop_6213_110_HWE2.gen", pairwise = TRUE,
+#                         boots  = 1000, para = TRUE)
+
+
+```
+
+
+```{r caclulate Neis D}
+
+mapping_NeiD <- stamppNeisD(mappinggl)
+mapping_NeiD[0,] <- mapping_NeiD[,0]
+print(mapping_NeiD)
+
+```
+
+# Genetic Diversity
+
+### Oserved & Expected Heterozygosity
+
+```{r Report observed Heterozygosity, fig.height = 10, fig.width = 7}
+
+# my edited version no longer required - dartR fixed 
+
+HetPop <- gl.report.heterozygosity(mappinggl)  #  boxplot = "adjusted", cex.labels = 1
+print(HetPop)
+write_csv(HetPop)
+
+```
+
+
+### Boxplots of locus Ho
+
+```{r boxplots of observed Heterozygosity between pops, include=FALSE}
+
+# boxplots of Ho... now will update with changes to mappinggl
+  # define function to averages across bettongs (within pop) for each locus
+  Ho.colmeans <- function(gl) {                # formula adapted from gl.report.heterozygosity, 
+    colMeans(as.matrix(gl) == 1, na.rm = TRUE)
+  } 
+  
+  # Apply Ho.colmeans to list of pop gls, and convert result to df 
+Ho_popsgls <- data.frame(lapply(popsgls, Ho.colmeans))  # popsgls = list of pop gls defined at top
+  
+  # plot the variation across loci in obs het. within each pop
+   # boxplot(Ho_popsgls, varwidth = TRUE, names = Population2, range = MeanSeHo_df$se) 
+
+    # hmmm... boxplot looks like there isnt a real difference between pops...  
+    # calculate stadard error (and mean) for each pop
+      # for loop to calculate  meanandse for each pop
+AvpopHo_names <- getobjnames.popsufix("MeanSeHo_", popabv)
+        for (pop in 1:length(Population)) {
+          popHo <- Ho_popsgls[,pop]
+          AvpopHo <- meanandse(popHo)
+          assign(AvpopHo_names[pop], AvpopHo)
+        }
+        
+      # format nicely as df
+MeanSeHo_df <- rbind(MeanSeHo_sp, MeanSeHo_dav, MeanSeHo_emu, MeanSeHo_tin) # Lower Davies here
+MeanSeHo_df <- cbind.data.frame(Population, MeanSeHo_df)
+           
+        # so even though the boxplots look not very different, according to the standard error they area very different
+        # 0.1266476	 + 0.001304903  # mean sp + Se 
+        # 0.1874558	- 0.001063995	  # lowest mean of other pops - se 
+        # >> these are no where near overlapping...
+        
+        # but standard dev is much bigger?? - need to revise
+     
+# add std dev col to df 
+# calculate std dev
+stdev_Ho <- c()
+for (pop in 1:length(Population)) {
+  popHo <- Ho_popsgls[,pop]
+  SDpopHo <- sd(popHo, na.rm = TRUE)
+  stdev_Ho <- c(stdev_Ho, SDpopHo)
+}
+
+# add to df
+MeanSeHo_df <- cbind.data.frame(MeanSeHo_df, stdev_Ho)
+        
+# and median to df
+# calculate median
+median_Ho <- c()
+for (pop in 1:length(Population)) {
+  popHo <- Ho_popsgls[,pop]
+  medpopHo <-  median(popHo, na.rm = TRUE)
+   median_Ho <- c(median_Ho, medpopHo)
+}
+# add to df
+MeanSeHo_df <- cbind.data.frame(MeanSeHo_df,  median_Ho)
+
+
+print(MeanSeHo_df)
+
+# plot the variation across loci in obs het. within each pop
+boxplot(Ho_popsgls, varwidth = TRUE, notch = FALSE, names = Population2, range = 1.5, ylab = "Locus Heterozygosity", col= popcol)
+
+
+     
+    # refresh boxplots: http://www.physics.csbsju.edu/stats/box2.html
+     # Boxplots are a standardized way of displaying the distribution of data based on a five number summary (“minimum”, first quartile (Q1), median, third quartile (Q3), and “maximum”).
+     # Outliers: are either 3×IQR or more above the third quartile or 3×IQR or more below the first quartile.
+     # Suspected outliers: either 1.5×IQR or more above the third quartile or 1.5×IQR or more below the first quartile.
+       
+
+```
+### MLH 
+Multi Locus (indiviudal) Heterozygosity 
+
+```{r MLH, fig.height = 9, fig.width = 12}
+#, fig.height = 7, fig.width = 9 # for density plot
+ 
+# covert to matrix
+  pops_mx_ls <- sapply(popsgls, as.matrix)
+
+# create MLH function (proporition loci that each ind =1)
+  MLH <- function(mx){
+    rowMeans(mx == 1, na.rm =TRUE)  
+  }
+  
+# apply MLH function to list of pop matricies
+  pops_MLH <- sapply(pops_mx_ls, MLH)
+
+  # check
+  #  head(pops_MLH[[2]])  # e.g. for dav
+
+
+# combine/format MLH output as long df
+  for (pop in 1:length(Population)) {
+    popname <- Population[pop]
+    MLH_pop <- pops_MLH[[pop]]
+    popdf   <- data.frame(btpops = popname,
+                          MLH = MLH_pop)
+    assign(paste(popabv[[pop]], "MLHdf", sep = "_"), popdf)
+  }
+  
+  MLH_df <- rbind.data.frame(sp_MLHdf,
+                             dav_MLHdf,
+                             emu_MLHdf,
+                             tin_MLHdf)    
+write.csv(MLH_df, paste0("output/MLH_df", Vsfx, ".csv"))
+
+# Barplot geom_col
+#  MLH_df <- MLH_df %>% group_by(btpops)
+  
+# create row ID col so plotted in order (i.e. grouped) of pops instead of barcode sort order 
+  MLH_df$rowID <- 1:nrow(MLH_df)
+  
+  
+#================================================================================
+# NOT RUN 04/02/21 'Error: Aesthetics must be either length 1 or the same as the data (175): fill' 
+  
+  levels(MLH_df$btpops)
+  
+  MLH_df$colour[MLH_df$btpops == "Spurg"] <- "salmon"
+  MLH_df$colour[MLH_df$btpops == "Dav"] <- "purple"
+  MLH_df$colour[MLH_df$btpops == "Emu"] <- "green"
+  MLH_df$colour[MLH_df$btpops == "Tin"] <- "cyan"
+    
+  
+# bar plot
+ggplot(MLH_df, aes(x = rowID, y=MLH)) +
+  geom_col(aes(group = btpops, fill = btpops), width = 1.5) +  # (geom_col allows individuals to be plotted on x-axis and values on y)
+  theme(axis.title.x = element_blank()) +
+  scale_x_discrete(limit = MLH_df$btpops,
+                   labels = MLH_df$btpops)
+
+# ggplot(MLH_df, aes(x = rowID,y = MLH)) +
+#   geom_col(aes(fill = btpops, colour = popcol)) +
+#   labs(x = NULL)
+
+#================================================================================
+  
+#   
+# ggplot(MLH_df, aes(x = rowID,y=MLH)) +
+#   geom_col(aes(fill = btpops)) +
+#   scale_x_discrete(limit = MLH_df$btpops, guide_axis(n.dodge=3))
+# 
+# #  geom_text(aes(label = MLH_df$btpops), check_overlap = TRUE)
+
+# We will use guide_axis() within scale_x_discrete() as shown below. We have used the argument n.dodge=3 inside guide_axis().
+
+
+# rename pops so theyll fit on graph 
+ levels(MLH_df$btpops) <- c("Spurg","Dav", "Emu","Tin") # Lower Davies here
+  
+# Plot density
+  ggplot(MLH_df, aes(x = MLH, fill = btpops)) + 
+    geom_density(alpha = 0.5) +
+    xlim(0.05,0.5) + 
+    theme(legend.position = c(0.87, 0.8))
+  # y axis denisty is scaled to 100 
+
+
+  
+# roughly normal?
+# ANOVA of MLH 
+MLH_aov <- aov(MLH ~ btpops, MLH_df)
+
+ summary(MLH_aov) # yes signifcantly different
+
+# use Tukeys HSD to see which pairs differ
+  MLH_Tukey <- TukeyHSD(MLH_aov) # Tukeys pairwise MLHnestly significant difference between pops
+print(MLH_Tukey)
+
+# tuk_plot(MLH_Tukey, "Mean and 95% confidence interval differnece in individual MLH between populations", ylab=NULL)
+```
+#### Boxplot to get MLH  outliers
+from https://condor.depaul.edu/sjost/lsp121/documents/boxplots.htm
+Mild vs. Extreme Outliers
+- Extreme outliers are data points that are more extreme than Q1 - 3 * IQR or Q3 + 3 * IQR.
+- Mild outliers are data points that are more extreme than than Q1 - 1.5 * IQR or Q3 + 1.5 * IQR, but are not extreme outliers
+
+```{r MLH outlier boxplot, fig.height = 9, fig.width = 12}
+
+#
+ranges <- c(1.5,3)
+outtype <- c("mild", "extreme")
+
+
+# i = 1
+for (i in 1:2) {
+MLH_box <- boxplot(MLH ~ btpops, data = MLH_df, range = ranges[i], notch = T, col = popcol2)
+
+MLH_boxstats            <- as.data.frame(MLH_box$stats)
+names(MLH_boxstats)     <- MLH_box$names
+row.names(MLH_boxstats) <-  c("lower whisker", "lower hinge", "median", "upper hinge", "upper whisker")
+
+outliers <- assign(paste0("outliers_", outtype[i]), MLH_df[MLH_df$MLH %in% MLH_box$out,])
+MLH_boxstats
+outliers
+
+}
+
+
+MLH_conf <- as.data.frame(MLH_box$conf)
+names(MLH_conf) <- MLH_box$names
+row.names(MLH_conf) <- c("LwrNotch", "UprNotch")
+MLH_conf
+
+
+# cant just merge straight because esxtreme outliers are also in mild dataset
+outliers_extreme$outlier <- "extreme"
+outliers_df <- merge(outliers_extreme, outliers_mild, all = T)
+
+outliers_df$outlier[is.na(outliers_df$outlier)] <- "mild"
+
+MLH_df <- merge(MLH_df, outliers_df, all = T)
+
+MLH_df$outlier[is.na(MLH_df$outlier)] <- "none"
+
+# popcoldf <- as.data.frame(popcol)
+# 
+# popcoldf$btpops <- row.names(popcoldf)
+# MLH_df <- merge(MLH_df, popcoldf, all = T)
+# names(MLH_df)[6] <- "pop_colour"
+
+# to set order of pops, reorder as factor before plotting
+MLH_df$btpops <- factor(MLH_df$btpop, levels = Population) 
+
+# popcol <- c("Spurgeon" = "salmon2", "Davies Creek" = "mediumpurple3", "Emu Creek" = "darkseagreen", "Tinaroo" = "deepskyblue4")
+
+# export plots
+jpeg(paste0("plots/MLH_ggboxplot_", Sys.Date(), ".jpg"), width = 5, height = 4, units = 'in', res = 600)
+
+ggplot() + 
+#  geom_boxplot(notch=TRUE, outlier.colour="red", outlier.shape=8, outlier.size=4) +
+  geom_boxplot(data =MLH_df, aes(x=btpops, y=MLH, fill = btpops), notch=TRUE, outlier.shape = NA) +
+  stat_boxplot(geom ='errorbar', data =MLH_df, aes(x=btpops, y=MLH), width = 0.2) +
+  scale_fill_manual(values = popcol, breaks = Population) + 
+  geom_point(data = MLH_df[MLH_df$outlier == "mild",], 
+             aes(x=btpops, y=MLH, group = btpops), colour = "black", position=position_dodge(width=0.75)) +
+  geom_point(data = MLH_df[MLH_df$outlier == "extreme",], 
+             aes(x=btpops, y=MLH, group = btpops), colour = "red", shape=8,size=4, position=position_dodge(width=0.75)) +
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), legend.position = "none", axis.text = element_text(size = 10)) +
+  labs(x=NULL)
+  
+dev.off()
+
+
+```
+
+## Wilcoxon Rank Sum Test MLH
+
+https://sphweb.bumc.bu.edu/otlt/mph-modules/bs/bs704_nonparametric/BS704_Nonparametric4.html
+
+Mann Whitney U Test (Wilcoxon Rank Sum Test)
+The modules on hypothesis testing presented techniques for testing the equality of means in two independent samples. An underlying assumption for appropriate use of the tests described was that the continuous outcome was approximately normally distributed or that the samples were sufficiently large (usually n1> 30 and n2> 30) to justify their use based on the Central Limit Theorem. When comparing two independent samples when the outcome is not normally distributed and the samples are small, a nonparametric test is appropriate.
+
+A popular nonparametric test to compare outcomes between two independent groups is the Mann Whitney U test. The Mann Whitney U test, sometimes called the Mann Whitney Wilcoxon Test or the Wilcoxon Rank Sum Test, is used to test whether two samples are likely to derive from the same population (i.e., that the two populations have the same shape). Some investigators interpret this test as comparing the medians between the two populations. Recall that the parametric test compares the means (H0: μ1=μ2) between independent groups.
+
+In contrast, the null and two-sided research hypotheses for the nonparametric test are stated as follows:
+
+H0: The two populations are equal versus
+
+H1: The two populations are not equal.
+
+This test is often performed as a two-sided test and, thus, the research hypothesis indicates that the populations are not equal as opposed to specifying directionality. A one-sided research hypothesis is used if interest lies in detecting a positive or negative shift in one population as compared to the other. The procedure for the test involves pooling the observations from the two samples into one combined sample, keeping track of which sample each observation comes from, and then ranking lowest to highest from 1 to n1+n2, respectively.
+
+```{r MLH wilcox test, fig.height = 12, fig.width = 10}
+
+# kruskal.test (non-paramentric ANOVA)
+
+MLH_kruskal <- kruskal.test(MLH ~ btpops, data = MLH_df)
+print(MLH_kruskal)
+
+
+MLH_wilcox <- pairwise.wilcox.test(MLH_df$MLH, g= MLH_df$btpops, p.adjust.method = "BY") # "bonferroni"
+
+print(MLH_wilcox)
+summary(MLH_wilcox)
+
+
+```
+
+
+
+### Kruskal test Ho * pop
+
+Test for signicant diff in locus Ho between populations using kruskal.test
+
+Only in cases where the distributions in each group are similar can a significant Kruskal–Wallis test be interpreted as a difference in medians.
+
+
+Zar (2010) states that the Dunn test is appropriate for groups with unequal numbers of observations.
+
+```{r kruskal test of observed Heterozygosity between pops, fig.height = 7, fig.width = 9}
+
+# kruskal.test (non-paramentric ANOVA)
+# prep data
+ colnames(Ho_popsgls) <- c("spurg", "Dav", "Emu","Tin")  # rename so theyll fit on th graph # Lower Davies here
+ Ho_long <-reshape2:: melt(Ho_popsgls, na.rm =TRUE) # was 96516 without na.rm!
+ colnames(Ho_long) <- c("Population", "Ho")
+
+# medians 
+
+med_locHo <-  Ho_long %>%
+                    group_by(Population) %>%
+                    summarise(Ho_med= median(Ho))
+IQR_locHo <- Ho_long %>%
+                    group_by(Population) %>%
+                    summarise(Ho_IQR= IQR(Ho))
+  
+
+# run kruskal.test
+ 
+Ho_kruskal <- kruskal.test(Ho ~ Population, Ho_long)
+print(Ho_kruskal)
+
+
+
+  
+# # use  Wilcoxon rank sum test  to see which pairs differ - unsuitable for more than two groups (?)
+#   Ho_Wilcox <- pairwise.wilcox.test(Ho_long$Ho, Ho_long$Population, paired = FALSE, p.adjust.method = "bonferroni")
+#   print(Ho_Wilcox)
+#     
+# Ho_Wilcox_mx <- as.matrix(Ho_Wilcox)
+
+  
+# use  Dunn's Test of Multiple Comparisons to see which pairs differ
+  Ho_Dunn <- dunn_test(Ho_long, Ho ~ Population, p.adjust.method = "bonferroni")
+  print(Ho_Dunn)
+
+# # Nonparametric multiple contrast tests and simultaneous confidence intervals (independent samples)
+# Ho_mctp <- mctp(Ho ~ Population, Ho_long,type = "Dunnett", alternative = "two.sided", plot.simci = TRUE)
+# summary(Ho_mctp)
+# plot(Ho_mctp)
+
+# # ANOVA of observed heterozygosity 
+#   Ho_aov <- aov(Ho ~ Population, Ho_long)  
+#   
+#  summary(Ho_aov) # yes signifcantly different
+#   
+# # use Tukeys HSD to see which pairs differ
+#   Ho_Tukey <- TukeyHSD(Ho_aov) # Tukeys pairwise honestly significant difference between pops
+# print(Ho_Tukey)
+# 
+# tuk_plot(Ho_Tukey, "Mean and 95% confidence interval differnece in observed heterozygosity between populations", ylab=NULL)
+# 
+
+# 
+# library(car)
+# 
+# Ho_long$Hologit <- logit(Ho_long$Ho)
+# 
+# boxplot(Hologit ~ Population, Ho_long)
+# 
+# # Plot density
+#   ggplot(Ho_long, aes(x = Hologit, fill = Population)) + 
+#     geom_density(alpha = 0.5) +
+#     xlim(-5,4) + 
+#     theme(legend.position = c(0.87, 0.8))
+
+```
+
+### Allelic Richness
+The other main measure of genetic diversity
+
+```{r Calculate allelic richness, message=FALSE} 
+# popsgls <- popsgls_ldav
+# Population <- Population_ldav
+
+AlleleRich.pops <- sapply(popsgls, CalcAlleleRich2)  # my function for use with one gl
+      
+print(AlleleRich.pops)    
+
+```
+
+### AR rareboot
+Rarefication bootstrapping of Alellic Richness
+Check that the lower allelic richness at Spurgeon isnt just a result of the small sample size by subsampling (rareifying) the other pops to the same number of indiviudals (13) and bootstrapping this rareification
+
+```{r Rarefication bootstrapping of Allelic Richness, include=FALSE}
+
+#run_if_first(outname = "AlleleRich_rareboot", fn = , overwrite = rerun)
+if(!file.exists(file = paste(Rflder, "AlleleRich_rareboot1000.Rdata", sep = "/")) | rerun.AR_rareboot) {  # runs the first time or if rerun flag is true
+    
+# # function to apply CalcAlleleRich over a list of pop gls
+      # rarefy.gls.CalcAlleleRich <- function(gl_ls) {             # gl_ls = list of genelights
+      #   rare_gls <- sapply(gl_ls, rarefy.pop)             # apply function created above returns list of one subset genelight per pop
+      #   sapply(rare_gls,  CalcAlleleRich) # then apply report.heterozygosity for each subset gl
+      # }
+
+    # loop  bootstrapping to repeat sampling
+
+      AlleleRich_rareboot <- c()  # rareboot = rareified bootstrapping
+
+      for (n in 1:1000) {
+        rareAR <- rarefy.gls.CalcAlleleRich(popsgls)
+        rareAR_df <- as.data.frame(rareAR)
+        rareAR_df$Population <- rownames(rareAR_df)
+        rareAR_df$rep <- n
+        AlleleRich_rareboot <- rbind(AlleleRich_rareboot, rareAR_df)
+      }
+
+     # AlleleRich_rareboot <- AlleleRich_rareboot[, -c(4:5)] # subset to remove extra cols - leaves one col for each pop ## CHANGE
+      AlleleRich_rareboot$Population <- factor(AlleleRich_rareboot$Population, levels = Population)
+      levels(AlleleRich_rareboot$Population)
+      save(AlleleRich_rareboot, file = paste(Rflder, "AlleleRich_rareboot1000.Rdata", sep = "/"))
+}
+
+ load(file = paste(Rflder, "AlleleRich_rareboot1000.Rdata", sep = "/"))   # read back in
+
+```
+
+#### plot AR rareboot
+
+```{r display results of Rarefication bootstrapping of Allelic Richness 1, fig.height = 6, fig.width = 6}
+
+
+#  Boxplot
+   boxplot(rareAR ~ Population, data = AlleleRich_rareboot, ylab = "Allelic Richness", col = popcol_ldav) # plot Allelic Richness estimates calculated from repeatedly sampling 13 individuals from each pop
+   
+```
+https://www.statisticshowto.com/probability-and-statistics/binomial-theorem/normal-approximation-to-the-binomial/#:~:text=According%20to%20the%20Central%20Limit,sample%20size%20is%20large%20enough.
+
+The normal approximation to the binomial is when you use a continuous distribution (the normal distribution) to approximate a discrete distribution (the binomial distribution). According to the Central Limit Theorem, the sampling distribution of the sample means becomes approximately normal if the sample size is large enough.
+
+#### Summarize AR rareboot
+
+```{r Summarize AR rareboot, fig.height = 6, fig.width = 6}
+# calculate mean, se, sd, min & max for each pop
+  # Avg_AlleleRich_rareboot  <- c()
+  # for (pop in 1:length(Population)) {
+  #   popAR <- AlleleRich_rareboot[,pop]
+  #   AvAR <-  c(meanandse(popAR), "sd" = sd(popAR), "min" = min(popAR), "max" = max(popAR))
+  #   Avg_AlleleRich_rareboot <- rbind(Avg_AlleleRich_rareboot, AvAR)
+  # }
+  
+  Avg_AlleleRich_rareboot <- AlleleRich_rareboot %>%
+    group_by(Population) %>%
+    summarise(mean_rareAR = mean(rareAR),
+              sd_rareAR = sd(rareAR),
+              se_rareAR = se(rareAR),
+              min_rareA = min(rareAR),
+              max_rareA = max(rareAR))
+  
+  print(Avg_AlleleRich_rareboot)
+  
+# # convert to df and add Population names
+#     Avg_AlleleRich_rareboot <- data.frame(Avg_AlleleRich_rareboot)
+#     row.names(Avg_AlleleRich_rareboot) <- Population
+#     
+#       print(Avg_AlleleRich_rareboot)
+      
+  write.csv(Avg_AlleleRich_rareboot, paste0("output/Avg_AlleleRich_rareboot_",datcode,  ".csv"))
+# }
+```
+
+#### test population differences AR rareboot
+
+```{r  test population differences AR rareboot, fig.height = 9, fig.width = 12}
+# density curves
+#  AlleleRich_rareboot_long <- melt(AlleleRich_rareboot[,2:4], value.name = "rareAR", variable.name = "pop")  # remove [,2:4] to include SPurgeon reps
+  ggplot(AlleleRich_rareboot, aes(x=rareAR, color=Population)) + 
+    geom_density() +
+    xlim(1.7,1.85)
+  
+
+LR_AR <- AlleleRich_rareboot %>%
+  filter(Population != "Spurgeon")
+
+# Test Spurgeon against 95% confidence prediction
+
+LR_pred_intvl <- matrix(nrow = 3, ncol = 3)
+for (i in 2:4) {
+  pop  <- Population[i]
+  ARlm <- lm(rareAR ~ 1, data = LR_AR, subset = Population == pop)
+  pi   <- predict(ARlm,
+                  interval = "predict")
+  LR_pred_intvl[(i-1),] <- pi[1,]
+}
+
+LR_pred_intvl <- cbind.data.frame("LRpopulaion" = Population[2:4], LR_pred_intvl, 
+                                  "Spurgeon_AR" =Avg_AlleleRich_rareboot[1,2])
+names(LR_pred_intvl)[2:5] = c("fit", "lwr", "upr", "Spurgeon_AR")
+print(LR_pred_intvl)
+
+
+
+## Allelic richness testing 18 Jan 2022 (as per Dyer 2017)
+# ae.sp <- Avg_AlleleRich_rareboot$mean_rareAR[1]
+# null.ae <- AlleleRich_rareboot$rareAR[AlleleRich_rareboot$Population == "Davies Creek"]
+# length(null.ae)
+# P <- sum( ae.sp >= null.ae ) / ( length(null.ae) )
+
+
+# Test differences between LR populations
+rareAR_aov <- aov(rareAR ~ Population, data = LR_AR)
+summary(rareAR_aov)
+TukeyHSD(rareAR_aov)
+```
+
+
+```{r  export boxplot AR rareboot, fig.height = 9, fig.width = 12}
+#  Boxplot
+boxplot(rareAR ~ Population, data = AlleleRich_rareboot, ylab = "Allelic Richness", col = popcol) # plot Allelic Richness estimates calculated from repeatedly sampling 13 individuals from each pop
+
+
+AlleleRich.popsl <- melt(AlleleRich.pops, value.name = "sampleAR", variable.name = "pop")  # AlleleRich.pops = unadjusted AR calculated above
+AlleleRich.popsl$pop <- Population
+AlleleRich.popsl$pop <- factor(AlleleRich.popsl$pop, levels = Population)
+
+# export box plot
+jpeg(paste0("plots/ARrare_box_", Sys.Date(), ".jpg"), width = 5, height = 4, units = 'in', res = 600)
+
+ggplot() + 
+  geom_point(data = AlleleRich.popsl, 
+            aes(x=pop, y=sampleAR, group = pop), shape=17, size=3, colour = popcol, position=position_dodge(width=0.75)) +
+ # scale_fill_manual(values = popcoldot, breaks = Populationdot) +
+  geom_boxplot(data =LR_AR, aes(x=Population, y=rareAR, fill = Population), notch=TRUE, outlier.shape = NA) +
+  stat_boxplot(geom ='errorbar', data =LR_AR, aes(x=Population, y=rareAR), width = 0.2) +
+  scale_fill_manual(values = popcol, breaks = Population) + 
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), 
+        legend.position = "none",  axis.text = element_text(size = 10)) +
+  labs(x=NULL, y = "allelic richness")
+dev.off()
+
+
+
+
+```
+
+
+
+### q-profile
+
+   "This script takes a genlight object and calculates alpha and beta diversity for q=0:2. Formulas are taken from Sherwin et al. 2017. The paper describes nicely the relationship between the different q levels and how they relate to population genetic processes such as dispersal and selection. For all indices the entropies (H) and corrosponding effective numbers Hill numbers (D), which reflect the amount of entities that are needed to get the observed values are are calculated. In a nutshell the alpha indices between the different q-values should be similar if there are no deviation from expected allele frequencies and occurrences (e.g. all loci in HWE & equilibrium). If there is a deviation of an index this links to a process causing it such as dispersal, selection or strong drift."
+   
+  q0 = allelic richness
+  q1 = Shannon Index
+  q2 = Heterozygosity
+   
+   References
+Sherwin, W.B., Chao, A., Johst, L., Smouse, P.E. (2017). Information Theory Broadens the spectrum of Molecular Ecology and Evolution. TREE 32(12) 948-963. doi:10.1016/j.tree.2017.09.12
+
+
+```{r Calculate q diversity indices, message=FALSE,  fig.height = 8, fig.width = 8}
+
+# rename pops so labels will fit on plot
+  names(popsgls) <- Population2
+
+# now define function elsewhere
+
+# Calculate q diversity indices
+   diverse_q <- gl.diversity.edited(mappinggl, confiplot = T)  # edited uses my popsgls order and colours
+   
+# rename pops back again so they work with rest of code 
+  names(popsgls) <- Population
+ 
+# convert 'alpha' indicies (within pop) to df to export
+ q_alpha <- c()
+ for (slotno in 3:14) {
+  q_alpha <- rbind(q_alpha, diverse_q[[slotno]])
+ }
+
+ 
+ q_alpha <- data.frame(q_alpha, row.names = names(diverse_q[3:14]))
+ 
+ #-----------------------------
+ 
+  names(diverse_q)
+ 
+q_alpha_t <- t(q_alpha)
+#View(q_alpha_l)
+ 
+q_alpha_l <- rbind(q_alpha_t[,1:2],q_alpha_t[,3:4], q_alpha_t[,5:6], q_alpha_t[,7:8], q_alpha_t[,9:10], q_alpha_t[,11:12])
+
+q_alpha_l <- as.data.frame(q_alpha_l)
+
+scale <- c()
+scale[1:12] <- "H"
+scale[13:24] <- "D"
+q_alpha_l$scale <- scale
+
+q_value <- c()
+q_value[c(1:4, 13:16)] <- 0
+q_value[c(5:8, 17:20)] <- 1
+q_value[c(9:12, 21:24)] <- 2
+q_alpha_l$q_level <- q_value
+
+q_alpha_l$pop <- Population2
+names(q_alpha_l)[1:2] <- c("alpha", "sd")
+
+q_alpha_l$se <- q_alpha_l$sd / sqrt(mappinggl$n.loc)
+
+  
+
+# ---------------------------
+
+ write.csv(q_alpha, paste0("output/q_alpha_ldav", Vsfx, ".csv"))
+ 
+# check if top half of matrix is sd or if comparison is directional
+ q_beta <- c()
+ for (slotno in 15:20) {
+  beta <- melt(diverse_q[[slotno]])
+  colnames(beta) <- c("pop1", "pop2", "beta_value")
+  beta$beta_measure <- names(diverse_q[slotno])
+  q_beta <- rbind(q_beta, beta)
+ }
+
+
+ write.csv(q_beta, paste0("output/q_beta", Vsfx, ".csv"))
+ 
+
+
+ # what are beta values on the top vs bottom of the matrix??
+ 
+ # m_0Ha	reads 'mean Diversity index (H) for q=0 Information level at the alpha level (within pop)'
+   # 'm_' = mean; 'sd_' = standard dev
+ # information levels of H:
+   # '0H' = q=0 (allelic richness)
+   # '1H' = q=1 (Shannon Index)
+   # '2H' = q=2 (exp. Hetrozygosity)
+ # Ha = aplpha diversity measures (within pop)
+ # Hb = beta diversity measures (between pops)
+```
+
+
+
+# HWE
+
+### HetHom 
+create HetHom df
+
+```{r create HetHom dataset, include=FALSE}
+for (pop in 1:4) {
+  # create metrics
+    nhet   <- colSums(as.matrix(popsgls[[pop]]) == 1, na.rm = TRUE)  #   popsgls / popsgls_v / popsdfs all work
+    nhom1  <- colSums(as.matrix(popsgls[[pop]]) == 0, na.rm = TRUE)
+    nhom2  <- colSums(as.matrix(popsgls[[pop]]) == 2, na.rm = TRUE)
+    
+    N         <- nhet + nhom1 + nhom2  # sample size exlcudes missing data
+    # N         <- max(nhet + nhom1 + nhom2) # sample size incldues missing data
+    
+    # obnull.old    <- HetHomls[[pop]]$obnull  ### <<< here changed - use old obnull
+    # r.old         <- HetHomls[[pop]]$r           # <<<<< also here - use old r
+    ref_p     <- (nhom1 +  0.5 * nhet) / N    # ref allele freq
+    snp_q     <- (nhom2 +  0.5 * nhet) / N    # SNP allele frequency 
+    He        <- 2 * ref_p * snp_q            # Exp. Het(2pq or 2p*(1-p)
+    Ho        <- nhet / N                     # Obs Het                    
+    obhom1    <- nhom1 / N                    # frequency hom1
+    obhom2    <- nhom2 / N                    # frequency hom2
+    obshom    <- obhom1 + obhom2              # Obs Hom
+    HeHo_diff <- He - Ho                       
+    
+    Fis           <- (He - Ho) / He
+  
+  # bind together as df
+    HetHom_pop <- cbind.data.frame("Locus" = popsgls[[pop]]$loc.names, 
+                                   nhet, 
+                                   nhom1,
+                                   obhom1,
+                                   nhom2,
+                                   obhom2,
+                                   # obnull.old,
+                                   N,
+                                   # r.old,
+                                   ref_p,
+                                   snp_q,
+                                   He,
+                                   Ho,
+                                   HeHo_diff,
+                                   Fis)
+  
+  assign(paste0("HetHom_", popabv[pop]), HetHom_pop)  # write to env.
+} 
+
+
+HetHomls <- list(HetHom_sp, HetHom_dav, HetHom_emu, HetHom_tin) # create list 
+# HetHomls[[1]] <- HetHomls[[1]][!is.na(HetHomls[[1]]$Fis),] # nas causing problems plotting
+
+    
+# merge pop HetHom dfs
+HetHom <- data.frame()
+for (pop in 1:4) {
+  HetHomls[[pop]]$pop <- Population[pop]
+  HetHom <- rbind(HetHom, HetHomls[[pop]])
+}
+
+# write.csv(HetHom, file = paste0("output/HetHom_mappinggl", Vsfx, ".csv"))
+```
+
+
+```{r create HetHom summary, include=FALSE}
+# -----------------
+    
+# create summary tbl of Ho & He
+HetHomSum <-  HetHom %>%
+              group_by(pop) %>%
+              summarize(Mean_He =  mean(He, na.rm = T),
+                        Mean_Ho =  mean(Ho, na.rm = T),
+                        Mean_HeHodiff = mean(abs(HeHo_diff), na.rm = T))
+
+
+print(HetHomSum)
+  
+```
+
+### Test HWE
+
+```{r test HWE, include=FALSE}
+
+
+run_if_first(outname = "mapping_hwe_Fsh", fn = "gl.report.hwe", 
+             argsls = list(mappinggl,  "subset" = "each", "verbose" = 0, "plot.out" = T, "method_sig" = "Exact", "multi_comp" = T, "multi_comp_method" = "bonferroni", sig_only = F ), overwrite = rerun.testHWE)  # method_sig = "Exact" replaces "method" = "Fisher" (?)
+
+
+```
+
+
+
+```{r map results of HWE test back onto HetHom details of all loci}
+mapping_hwe <- mapping_hwe_Fsh
+
+mapping_hwe_Fsh %<>% 
+  mutate(Is_mapping_hwe_Fsh = TRUE)
+
+HetHom %<>% 
+  mutate(Is_HetHom = TRUE)
+
+
+# map results of HWE test back onto HetHom details of all loci
+# mapping_hwe_Fsh contins all polymorphic loci but is missing monomorphic
+hwe_allLoc <- merge(HetHom, mapping_hwe_Fsh, all = T,
+                    by.x= c("Locus", "pop"), by.y = c("Locus", "Population")) 
+
+hwe_allLoc  %<>% 
+  mutate(IsSig = Sig == "sig" & !is.na(Sig),
+         IsBonSig = Sig.adj == "sig"&  !is.na(Sig.adj),
+         IsLocusFixed = is.na(Fis)) %>%          # Fis = NAs due to fixation
+  dplyr::select(!(Hom_1:N.y)) %>%                # delete redundant cols
+  dplyr::rename("N" = N.x)
+
+write_csv(hwe_allLoc)
+
+```
+
+
+
+```{r summarise SNPs significantly departing from HWE }
+
+hwe1 <- hwe_allLoc %>%
+  dplyr::group_by(pop, IsSig) %>%
+  dplyr::summarise(count_polyLoc = sum(!IsLocusFixed),
+            mean_Fis_polyLoc = mean(Fis, na.rm = T)) %>%
+  tidyr::pivot_wider(names_from = IsSig, values_from = c(count_polyLoc, mean_Fis_polyLoc))
+
+
+hwe2 <- hwe_allLoc %>%
+  dplyr::group_by(pop) %>%
+  dplyr::summarise(total_polyLoc = sum(!IsLocusFixed),
+            overall_mean_Fis = mean(Fis, na.rm = T)) 
+
+hwe <- merge(hwe1, hwe2)
+
+hwe <- hwe[c(3,1,2,4),] # reorder rows
+names(hwe) <- mgsub::mgsub(names(hwe), pattern= c("TRUE", "FALSE"), replacement = c("Sig", "NotSig"))
+
+print(hwe)
+
+```
+
+
+## global HWE - binomial dist
+
+https://www.r-bloggers.com/2021/09/binomial-distribution-in-r-quick-guide/
+
+https://www.ncl.ac.uk/webtemplate/ask-assets/external/maths-resources/statistics/hypothesis-testing/itical-region-and-confidence-interval.html#Critical_Values
+```{r}
+
+# at significance alpha = 0.05
+# 'pr_by_chance' = null hypothesis probability
+
+hwe <- hwe %>%
+  mutate(pr_by_chance_upr = pbinom(q = count_polyLoc_Sig, size= total_polyLoc, prob=0.05, lower.tail = F),   # "success" = significantly out of HWE
+         pr_by_chance_lwr = pbinom(q = count_polyLoc_Sig, size= total_polyLoc, prob=0.05, lower.tail = T),
+         pr_lower_than_chance = 1 - pr_by_chance_upr, 
+         pr_greater_than_chance = 1- pr_by_chance_lwr)   # lower.tail - if TRUE (default), probabilities are P[X ≤ x], otherwise, P[X > x].
+  
+
+print(hwe)
+
+write_csv(hwe)
+
+```
+
+>>> Moved section to 'pwr_and_effect_size_HWE'<<<
+
+### Fis 
+Distribution plot of locus Fis - heterozygote deficiency or excess?
+
+```{r create hwe_fst2 df, inlcude = FALSE }
+## ====== Combine (merge) =====
+  ## mapping_hwe: loci  significantlly out of HWE (calculated by dartR)
+  ## HetHom:      similar format to above, but for all loci, not just those out of hwe
+  ## Fst_loci:    contains Fst and Fis values causing pattern. Fst and Fis for all pops
+  ## mapping_df:  to get individuals?
+
+  # add manually calculated Fis (different for ech locus x pop combo, i.e. will be different to Fis in Fst_loci)
+
+
+# ---- Calculate/ load Locus Fst ----
+
+# uses package pegas
+if(!file.exists(file =  paste(Rflder, "Fst_loci.Rdata", sep = "/"))) {
+  mapping_loci <- genind2loci(mapping_gi)  # fist convert to geneID format
+  save(mapping_loci, file = paste(Rflder,"mapping_loci.Rdata", sep = "/"))
+}
+  load(file = paste(Rflder,"mapping_loci.Rdata", sep = "/"))  # load each time because mapping_loci is subset from below
+
+if(!file.exists(file =  paste(Rflder, "Fst_loci.Rdata", sep = "/"))) {
+  Fst_loci <- Fst(mapping_loci)
+  save(Fst_loci, file =  paste(Rflder, "Fst_loci.Rdata", sep = "/"))
+}
+  load(file =  paste(Rflder, "Fst_loci.Rdata", sep = "/"))
+
+  
+# --- dataset prep and manual caluclations----
+
+## Mapping_hwe 
+# TYPE CONVERT - THIS WAS CAUSE OF ERROR!! converting directly from factor to integer changes the numbers!!!
+# for some reason counts were stored as factors, convert to integer to allow calculations
+mapping_hwe %<>% 
+    dplyr::mutate(Hom_1 = as.integer(as.character(Hom_1)),
+                  Het   = as.integer(as.character(Het)),
+                  N     = as.integer(as.character(N)))
+
+ # calculations 
+mapping_hwe %<>% 
+  mutate(ref_p = (2 * Hom_1 + Het) / (2 * N),
+         He    = 2 * ref_p * (1 - ref_p),
+         Ho    = Het / N,
+         Fis   = (He - Ho) / He)
+
+# Fst_loci
+Fst_loci <- as.data.frame(Fst_loci) %>% 
+  mutate(Locus = row.names(.),
+         Locus = as.character(Locus)) # if merge doesnt recognise matches may need to convert to character first 
+
+# --- Merge ----
+# merge first fst_loci  with HetHom, just by locus (both should contain all loci, but in HetHom each locus is replicated 4 times - i.e. for each pop)
+ hwe_fst <- merge(Fst_loci, HetHom, by ='Locus', all =T, suffixes = c(".allpops", ".bypop"))
+
+ mapping_hwe$pop <- gsub(" ", ".", mapping_hwe$Population)  # couldnt get it to sub the other way around (sub in space for ".")
+ hwe_fst2 <- merge(hwe_fst, mapping_hwe, by = c("Locus", "pop"), suffixes = c(".HetHom", ".dartr"), all = T)
+ 
+hwe_fst2$sig_bin[hwe_fst2$Sig != "ns"]    <- "sig"
+hwe_fst2$sig_bin[is.na(hwe_fst2$Sig)]     <- "ns"
+hwe_fst2$sig_bin[hwe_fst2$He.HetHom == 0] <- "fixed"
+
+save(hwe_fst2, file = paste(Rflder, "hwe_fst2.Rdata", sep = "/"))
+
+
+# ReadDepth_df <- cbind.data.frame(Locus = locNames(mappinggl),
+#                                  ReadDepth = mappinggl@other$loc.metrics$ReadDepth, 
+#                                  CallRate = mappinggl@other$loc.metrics$CallRate)
+# 
+# hwe_fst3 <- merge(hwe_fst2, ReadDepth_df, by = "Locus")
+# 
+# 
+# 
+#  write.csv(hwe_fst3, file = paste("output/hwe_fst3", Vsfx, ".csv", sep = ""))
+ 
+```
+
+
+```{r Call rate vs Fis corraltion, inlcude = FALSE }
+
+### Call rate vs Fis correlation - less N for excess than deficit?
+if(open.callrate_Fis_corr) {
+file.edit("callrate_Fis_corr.R")
+}
+ 
+```
+
+##### plots 
+
+```{r hist plot locus Fis by pop, fig.height = 4, fig.width = 5}
+
+if(plot.Fis_hist) {
+   #---- plot density curve of Fis by pop (or cwould boxplots be better?)
+  HetHom$Fis[is.na(HetHom$Fis)] <- 0  
+  
+  # # Plot density
+  #   ggplot(HetHom, aes(x = Fis, colour = pop)) + 
+  #     geom_density(alpha = 0.5) +
+  #     xlim(-1,1) + 
+  #     theme(legend.position = c(0.87, 0.8))
+  #   # y axis denisty is scaled to 100 
+  
+  # --- plot each pop separately as histograms
+  # -- Spurgeon --
+  ggplot(HetHom[HetHom$pop=="Spurgeon",], 
+         aes(x = Fis)) + 
+      geom_histogram(fill = popcol[1])
+  
+  # -- Davies--
+  
+  ggplot(HetHom[HetHom$pop=="Davies Creek",], 
+         aes(x = Fis)) + 
+      geom_histogram(fill = popcol[2])
+  
+  # -- Emu--
+  ggplot(HetHom[HetHom$pop=="Emu Creek",], 
+         aes(x = Fis)) + 
+      geom_histogram(fill = popcol[3])
+  
+  
+  # -- Tin --
+  ggplot(HetHom[HetHom$pop=="Tinaroo",], 
+         aes(x = Fis)) + 
+      geom_histogram(fill = popcol[4]) 
+}
+
+
+```
+middle of curve sits below zero (negative Fis) for all pops
+
+```{r boxplot locus Fis by pop, fig.height = 7, fig.width = 9}
+plot.Fis_box = T
+if (plot.Fis_box) {
+  ### Polymorphic loci
+HetHom_poly <- HetHom[HetHom$Fis != 0,] # monomorphoc loci have Fis of zero
+
+# boxplot
+Fis_box <- boxplot(Fis ~ pop, data = HetHom_poly, col = popcol, notch = F)
+
+# summary stats
+Fis_boxstats <- as.data.frame(Fis_box$stats)
+names(Fis_boxstats) <- Fis_box$names
+row.names(Fis_boxstats) <-  c("lower whisker", "lower hinge", "median", "upper hinge", "upper whisker")
+Fis_boxstats
+
+
+# # # mode (couldnt get to work - NaN?)
+# Mode <- function(x) {
+#   ux <- unique(x)
+#   ux[which.max(tabulate(match(x, ux)))]
+# }
+# 
+# # 
+# SpFis  <- HetHom[HetHom$pop == 'Spurgeon', !is.na(11)]
+# SpFis
+# 
+# DavFis <- HetHom[HetHom$pop == 'Davies.Creek', !is.na(11)]
+# EmuFis <- HetHom[HetHom$pop == 'Emu.Creek', !is.na(11)]
+# TinFis <- HetHom[HetHom$pop == 'Tinaroo', !is.na(11)]
+# 
+# Fis_popls <- list(SpFis$Fis, DavFis$Fis, EmuFis$Fis, TinFis$Fis)
+# modeFis_pops <- lapply(Fis_popls, Mode)
+# 
+# modeFis_pops[1]
+
+} 
+
+
+
+HetHom_poly$pop <- factor(HetHom_poly$pop, levels = Population)
+
+HetHom_poly <- HetHom_poly %>%
+  filter(!is.na(pop))
+
+   
+# export box plot
+jpeg(paste0("plots/Fis_box_", Sys.Date(), ".jpg"), width = 7, height = 5, units = 'in', res = 600)
+
+ggplot() + 
+ # scale_fill_manual(values = popcol, breaks = Population) +
+  geom_boxplot(data =HetHom_poly, aes(x=pop, y=Fis, fill = pop), notch=TRUE) +  #  outlier.shape = NA
+  stat_boxplot(geom ='errorbar', data =HetHom_poly, aes(x=pop, y=Fis), width = 0.2) +
+  scale_fill_manual(values = popcol, breaks = Population) + 
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), legend.position = "none") +
+  labs(x=NULL, y = "Heterozygote deficieny (Fis)")
+dev.off()
+
+
+
+```
+### Locus specific HWE effects
+
+```{r}
+# summarise hwe_fst2 to get number of populations eash locus is significant in
+
+load(file = paste(Rflder, "hwe_fst2.Rdata", sep = "/"))
+
+Npops_sig_l <- hwe_fst2 %>%
+                group_by(Locus, sig_bin) %>%
+                  summarize(pops_sig = n())
+
+
+Npops_sig <- spread(Npops_sig_l, sig_bin, pops_sig, fill = 0, convert = FALSE, drop = TRUE,
+  sep = NULL)
+
+
+ # NB not always 4*trials, as some loci are fixed!!
+
+# ggplot(Npops_sig_l, 
+#        aes(x=sig)) + geom_histogram() + scale_y_log10()
+
+# sample from null distribution
+ NullExp <- rbinom(n = length(Npops_sig$Locus), size = 4, prob = 0.05)
+ 
+# format and merege dfs for plotting
+  NullExp <- as.data.frame(NullExp)
+  NullExp$type <- "null expectation"
+  names(NullExp)[1] <- "Npops_sig"
+  
+  Npops_sig_df <- Npops_sig
+  Npops_sig_df$type <- "observed"
+  Npops_sig_df <- Npops_sig_df[,c(4,5)]
+  names(Npops_sig_df)[1] <- "Npops_sig"
+  
+
+  Npops_sig_ExpObs <- rbind.data.frame(Npops_sig_df, NullExp)
+
+ggplot(Npops_sig_ExpObs, 
+       aes(x=Npops_sig, color= type, fill = type)) + 
+  geom_histogram( position="dodge",  bins = 5) + 
+  scale_y_log10() +
+  labs(x = "Number of populations each locus is significant in", y = "count of loci")
+ 
+# which loci are sig in all 4 pops?
+locus_specific_hwe <- Npops_sig[Npops_sig$sig > 3, ]
+write.csv(locus_specific_hwe, file = paste0("output/locus_specific_hwe", Vsfx, ".csv"))
+
+
+```
+
+### Wahuld effects
+```{r}
+open.Wahuld_effects = T
+
+if (open.Wahuld_effects) {
+  file.edit("Wahuld_effects.R")
+} 
+
+```
+
+# Effective Population Size
+
+### NeEx 
+Ne Het Excess method (see Balloux 2004)
+
+Fis boxplot showing  distribution of locus heterozygote deficiency/excess:
+
+```{r Ne from Het Excess, fig.height = 7, fig.width = 9}
+# all loci
+  ### Polymorphic loci
+  HetHom_poly <- HetHom[HetHom$Fis != 0,] # monomorphoc loci have Fis of zero
+
+  Fis_box <- boxplot(Fis ~ pop, data = HetHom_poly, col = popcol, main = "Distribution of Fis - all polymorphic loci")
+ 
+  Fis_boxstats <- as.data.frame(Fis_box$stats)
+  names(Fis_boxstats) <- Fis_box$names
+  row.names(Fis_boxstats) <-  c("lower whisker", "lower hinge", "median", "upper hinge", "upper whisker")
+  Fis_boxstats <- Fis_boxstats[,Population]
+  
+  print(Fis_boxstats)
+
+# '_Fneg' => removed BonSig loci with Het deficit (positive Fis) - cuased by a different mechanism to small pop size
+  hwe_fst2$rows2remove <- hwe_fst2$Fis.bypop > 0 # & hwe_fst2$BonSig == "*"
+  Fis_Fneg <- hwe_fst2[!(hwe_fst2$rows2remove),]
+
+  Fis_Fneg_box <- boxplot(Fis.bypop ~ pop, data = Fis_Fneg, col = popcol, main = "Distribution of Fis - excluding BonSig deficit loci (Fneg)")
+
+  Fis_Fneg_boxstats <- as.data.frame(Fis_Fneg_box$stats)
+  names(Fis_Fneg_boxstats) <- Fis_Fneg_box$names
+  row.names(Fis_Fneg_boxstats) <-  c("lower whisker", "lower hinge", "median", "upper hinge", "upper whisker")
+ # print(Fis_Fneg_boxstats)
+
+
+# Function for calculating Ne from Heterozygosity excess  (see Balloux 2004/Pudovikin 1996)
+  NeEx <- function(Fis) {
+    1 / ( -2 * Fis ) + 1 / 2 * (1 - Fis)
+  }
+  
+  NeEx2 <- function(Fis) {  # other formula in Ballox
+    1 / ( -2 * Fis )
+  }
+
+```
+
+NeEx (median):
+```{r Ne from Het Excess medians, fig.height = 7, fig.width = 9}
+# # apply NeEx function to medians only
+# use median instead of mean for Ne formula - justify because not normal distribtution
+  median_all <- Fis_boxstats["median",]
+  median_Fneg <- Fis_Fneg_boxstats["median",]
+
+  NeEx_all  <- NeEx(Fis = median_all)
+  NeEx_Fneg <- NeEx(Fis = median_Fneg)
+  
+  names(NeEx_Fneg) <- names(NeEx_all)
+
+  # combine outputs from the two approaches
+  NeEx_df <- rbind.data.frame(NeEx_all, NeEx_Fneg)
+  row.names(NeEx_df) <- c("Ne all polymorphic loci", "Ne excluding BonSig deficit loci")
+  print(NeEx_df)
+  
+```
+
+NeEx meadian and CI from all loci:
+```{r Ne from Het Excess boxstats allLoc, fig.height = 7, fig.width = 9}
+# apply NeEx function to boxstats to get lower and upper CI range as well as median
+  NeEx_boxstats_allLoc <- NeEx2(Fis_boxstats)
+  (NeEx_boxstats_allLoc)
+
+```
+
+NeEx meadian and CI from Fneg loci:
+```{r Ne from Het Excess boxstats FnegLoc, fig.height = 7, fig.width = 9}
+NeEx_boxstats_FnegLoc <- NeEx(Fis_Fneg_boxstats)
+  print(NeEx_boxstats_FnegLoc)
+ 
+  # NeEx2_boxstats_FnegLoc <- NeEx2(Fis_Fneg_boxstats)
+  # NeEx2_boxstats_FnegLoc
+  # 
+
+```
+
+### Ne LD
+Linkage disequilibrium (LD) &  Effective population size (Ne) method from Waples 2006/2008
+LD is measured as the mean pairwise squared correlation coeficient (r2) between all possible combinations of loci pairs
+see 'investingating_r2_sampleError_overcorrection.R'
+
+```{r Calculate Ne adj from Ne Estimator 1}
+# ========================================================================================
+# Ne_estimator used separetly to estimate r2 and do most of Ne calculations --------------
+# ============================================================================================
+# use '03_NeLD_input_gi2genpop.R' to convert and export data to genepop format required by Ne Estimator software
+# currently there is an issue with population specificationn in gi2genpop which means I need to run each pop separately
+
+# now run NeLR with the following paremeters:
+# 'output files in tabular format for top 3 crit values' box checked to create 'LDxLD.txt' output.
+# uncheck methods other than NeLD
+# use critical values = 0.01,0.02,0.05
+# uncheck 'also run without frequency restriction'
+# >>> run
+# then: open up LDxLD text files and copy down to fill columns one & two e.g. "1:3_18/11/16    75" 
+
+# we set Pcrit in the program
+# to screen out alleles at frequency ,0.02; Waples and Do
+# (2010) found that this criterion provides a generally good
+# balance between maximizing precision and minimizing bias.
+```
+
+```{r}
+Ne_migrants_summary <- read.csv("output/Ne_migrants_summary.csv")
+cat("Number of migrants (determined at <", Ne_migrants_summary$threshold[1], " ancestry) removed for 'local' Ne estimate:")
+print(Ne_migrants_summary[,2:3])
+```
+
+
+```{r Calculate Ne adj from Ne Estimator 2}
+# read in output from Ne Estimator --------------------
+
+source("scripts/04_NeLD_output_wrangling.R") # this adjusts for chromasomes!
+
+Ne_estimator %<>% 
+  filter(CritValue == 0.02) %>% 
+  dplyr::select(Population, SampSize, r2, Ne, Eff.df:version) %>% 
+  mutate(Population = factor(Population, levels = .env$Population))
+
+Ne_metapop <- Ne_estimator %>% 
+  filter(version == "all inds")
+
+
+
+## plot Ne estimated with maf <0.02
+
+# order1 <- c(1,4,2,3) # salmon, green, cyan, purple  # Grrrr this is to fix annoying ggplot colours not behaving
+# plot with Jackknife CIs
+NeLD_Jackknife_plot <- ggplot(Ne_metapop, aes(x=Population, y= Ne_adj, fill = Population)) +
+   geom_bar(stat="identity", position=position_dodge(), show.legend = FALSE) +
+  geom_errorbar(aes(ymin= JackknifeCI_min.adj, ymax=JackknifeCI_max.adj), width=.3,
+                 position=position_dodge(.9)) +
+  ggtitle("Ne LD adjusted for number of chromasomes +/- JackKnife CI") +
+  labs(x = "") +
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_fill_manual(values = popcol, breaks = Population)
+
+
+# plot with parametric CIs
+ggplot(Ne_metapop, aes(x=Population, y= Ne_adj, fill = Population)) +
+  geom_bar(stat="identity", position=position_dodge(), show.legend = FALSE) +
+  geom_errorbar(aes(ymin= ParametricCI_min.adj, ymax=ParametricCI_max.adj), width=.3,
+                 position=position_dodge(.9)) +
+  ggtitle("Ne LD adjusted for number of chromasomes +/- parametric CIs") +
+   labs(x = "") +
+  theme(axis.text=element_text(size=12),
+      axis.title=element_text(size=14)) +
+  scale_fill_manual(values = popcol, breaks = Population)
+
+# # export plot
+# jpeg(paste0("plots/NeLD_Jackknife_", Sys.Date(), ".jpg"), width = 7, height = 5, units = 'in', res = 600)
+# print(NeLD_Jackknife_plot)
+# dev.off()
+
+```
+
+### Ne LD no migrants (local Ne)
+```{r Calculate Ne no migrants}
+
+Ne_local <- Ne_estimator %>% 
+  filter(version == "no migrants")
+
+NeLD_local_Jackknife_plot <- ggplot(Ne_local, aes(x=Population, y= Ne_adj, fill = Population)) +
+   geom_bar(stat="identity", position=position_dodge(), show.legend = FALSE) +
+  geom_errorbar(aes(ymin= JackknifeCI_min.adj, ymax=JackknifeCI_max.adj), width=.3,
+                 position=position_dodge(.9)) +
+  ggtitle("Ne LD adjusted for number of chromasomes +/- JackKnife CI") +
+  labs(x = "") +
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_fill_manual(values = popcol, breaks = Population)
+
+print(NeLD_local_Jackknife_plot)
+
+
+# # export plot
+# jpeg(paste0("plots/NeLD_Jackknife_", Sys.Date(), ".jpg"), width = 7, height = 5, units = 'in', res = 600)
+# print(NeLD_local_Jackknife_plot)
+# dev.off()
+
+```
+### Ne vs MAF p_crit plot
+See Waples and England 2011
+
+```{r Ne vs MAF p_crit plot}
+
+# WARNING THIS IS LEGACY OUTPUT FROM NE ESTIMTOR - NOT USING CURRENT DATA!!
+
+# read in output from Ne
+Ne_table<- read.table("Ne_Estimator/output/mapping_genpop_6213_110_HWELD_formatted.txt", 
+                      header = T, sep ="", skip = 10, nrows = 36)
+
+Ne_table$pop <- c(rep(Population[1], 9), rep(Population[2], 9), rep(Population[3], 9), rep(Population[4], 9))
+Ne_table2 <- Ne_table %>% 
+  pivot_longer(2:8, names_to = "MAF_filter") %>% 
+  pivot_wider(names_from = Label, values_from = value)
+
+Ne_adj <- ChromAdj.Ne(as.matrix(Ne_table2[,7:11])) %>% 
+  as.data.frame(.)
+names(Ne_adj) <- paste0(names(Ne_table2[,7:11]), ".adj")
+
+Ne_table2 <- cbind.data.frame(Ne_table2, Ne_adj) %>%
+  filter(MAF_filter != "No_S" ) %>%
+  mutate(MAF_p_crit = rep(x= c(0.05, 0.04, 0.03,0.02, 0.01, 0),4))
+
+# to set order of pops, reorder as factor before plotting
+Ne_table2$pop <- factor(Ne_table2$pop, levels = Population)
+
+p <- ggplot(data = Ne_table2, aes(x= MAF_p_crit, y = Estimated_Ne.adj , colour = pop)) +
+  geom_line()+
+  geom_point() +
+  scale_colour_manual(values = popcol, breaks = Population)+
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) 
+print(p)
+
+jpeg(paste0("plots/NeLD_vs_MAFpcrit_", Sys.Date(), ".jpg"), width = 7, height = 5, units = 'in', res = 600)
+print(p)
+dev.off()
+
+```
+
+# Migration rate from Ne
+
+Discrepancies between effective size estimates with and without migrants are used to estimate migration rate by rearranging Equation A1 in Waples and England (2011) 
+m=(N ̂_EPP-√(-N ̂_EPP (N ̂_EPP-2N ̂_e ) ))/(2N ̂_EPP )
+Where m = immigration rate, N ̂_EPP  = estimated effective pool of parents (including parents of immigrants), and N ̂_e = estimated local effective size (without migrants). 
+For simplicity:
+- only two populations were considered (i.e. n = 2 in original equation) 
+- equilibrium migration was assumed
+- and the contribution of individuals with immigrant ancestry ≤40% to the parent pool were ignored.
+
+```{r}
+
+calc_migrate_Ne <- function(Nelocal, Nepp){
+  m <- (Nepp - sqrt(-Nepp * (Nepp - 2 * Nelocal))) / (2 * Nepp)
+  return(m)
+}
+calc_migrate_Ne <- Vectorize(calc_migrate_Ne)
+
+migrantpops <- c("Emu Creek", "Tinaroo")
+
+# not the best way of doing this....
+for (i in 1:2) { # number of args in function, i.e. Nelocal, Nepp
+  v <- ifelse(i == 1, "no migrants", "all inds") 
+  temp <- Ne_estimator %>% 
+    filter(Population  %in% migrantpops,  # NB watch order!
+           version == v) %>% 
+    dplyr::select(Ne_adj) %>% 
+    .[,1]  # convert to vector
+  names(temp) <- migrantpops   #  NB watch order!
+  assign(paste0("arg", i), temp)
+}
+
+Ne_migrationR <- calc_migrate_Ne(Nelocal = arg1, Nepp = arg2)
+print(Ne_migrationR)
+
+```
+
+
+# Ind Dist
+Pairwise Genetic distance within each pop
+  bell saped curve (instead of poission/exp. decay) may indicate expansion from a historic bottleneck
+```{r create Pairwise Genetic distance matrix}
+# individual distance matrix within each pop
+
+#run.indist <- T
+# WARNING takes several hours to run!!
+if (run.indist) {
+  run_if_first(outname = "indist", fn = "sapply", 
+               argsls = list(popsgls, "FUN" = gl.dist.indpop, "method"="euclidean"))
+}
+
+```
+
+
+```{r plot Pairwise Genetic distance matrix and density curve, message=FALSE}
+
+if (run.indist) {
+  for (pop in 1:length(Population)) {
+       #   gl.dist.heatmap(indist[[pop]])        # plot coloured matrix
+          dist_df_pop     <- data.frame("distance" = as.vector(indist[[pop]])  )# collapse 2 dimensional array into 1 dimensinoal vector
+
+          plot <- ggplot(dist_df_pop, aes(x=distance)) +  # create density plot of pairwise genetic distance 
+                geom_density() +
+                labs(title = paste0("Density of pairwise genetic distance in ", Population[pop]))
+         print(plot)
+  }
+}
+
+
+```
+
+# Genetic relatedness matrix
+
+```{r create Genetic relatedness matrix pops, fig.height= 20, fig.width=20}
+
+popsglsnr <- rename_barcode2nr(popsgls)
+
+if (run.grm_network_pops) {
+## by population
+for (pop in 1:length(popsglsnr)) {
+  grm_pops <- gl.grm(popsglsnr[[pop]])
+  gl.grm.network(G = grm_pops, x = popsglsnr[[pop]], method = "kk")
+}
+  
+} else {
+  cat("Genetic relatedness matrix / netowrk - by poplation not run")
+}
+
+```
+
+```{r create Genetic relatedness matrix all, fig.height = 20, fig.width = 20}
+
+run.grm_network_all = T
+
+if (run.grm_network_all) {
+
+mappingglnr <- rename_barcode2nr(mappinggl, use_popabv = T)
+grm_all <- gl.grm(mappingglnr)
+  gl.grm.network(G = grm_all, x = mappingglnr, method = "kk")  # fr, kk, drl
+} else {
+  cat("Genetic relatedness matrix / netowrk - all samples pooled not run")
+}
+
+
+```
+# Population specific Fst vs AR/He
+
+```{r Population specific Fst, fig.height = 10, fig.width = 8}
+
+# Calculate population specific Fst
+mappingdf <- as.data.frame(mappinggl)
+
+hfs <- fs.dosage(dos = mappingdf, pop = mappinggl$pop)
+
+popFst <- c(hfs$FsM[1,1], hfs$FsM[2,2], hfs$FsM[3,3], hfs$FsM[4,4])
+
+names(popFst) <- c("Davies Creek", "Emu Creek", "Spurgeon", "Tinaroo")
+#cpopFst <- popFst[Population]
+
+# data <- read.csv("data/pop_specific_Fst.csv")  # manually created from results summary....
+
+# alternatively using package FinePop2
+popFst2 <- pop_specificFST(popdata = mapping_gen, cov = T)
+
+popFst_AR <- merge(Avg_AlleleRich_rareboot, HetHomSum, 
+                   by.x = "Population", by.y =  "pop") %>% 
+  mutate(Population = factor(Population, levels = .env$Population)) %>% 
+  arrange(Population)
+
+popFst_AR <- popFst_AR %>% 
+  mutate("pop_Fst" = popFst) %>%
+   # arrange(poporder) %>%
+  mutate(AR_raw = AlleleRich.pops) %>%
+  cbind.data.frame(., popFst2[[1]]) %>% 
+  rename(AR_rare = mean_rareAR,
+         He = Mean_He,
+         popFst2 = FST,
+         popFst2_SE = SE)
+  
+
+write_csv(popFst_AR)
+print(popFst_AR)
+
+```
+
+
+```{r Population specific Fst vs AR and He fit linear models, fig.height = 10, fig.width = 8}
+
+# fit linear models
+Helm <- lm(pop_Fst ~ He, popFst_AR)
+summary(Helm)
+
+ARrare_lm <- lm(pop_Fst ~ AR_rare, popFst_AR)
+ARraw_lm <- lm(pop_Fst ~ AR_raw, popFst_AR)
+
+# fit polynomial (quadratic) regression models of AR_raw and AR_rare
+
+# NB must be either:
+# I(AR_rare^2) or 
+# data$AR_rare2 <- data$AR_rare^2 and then pop_Fst ~ AR_rare + AR_rare2
+# NOT pop_Fst ~ AR_rare + AR_rare^2
+
+
+ARraw_qm <- lm(pop_Fst ~ AR_raw + I(AR_raw^2), popFst_AR)
+summary(ARraw_qm)
+summary(ARraw_lm)
+
+ARrare_qm <- lm(pop_Fst ~ AR_rare + I(AR_rare^2), popFst_AR)
+summary(ARrare_qm)
+summary(ARrare_lm)
+
+
+# create new values to plot line
+predicted_df <- data.frame(He =  seq(0.14, 0.23, 0.005),
+                           AR_rare = seq(1.45,1.81, 0.02),
+                           AR_raw = seq(1.45,1.9, 0.025))
+
+
+# predict pop Fst for new values, using models
+predicted_df$popFst_Hepredict <- predict(Helm, predicted_df)
+predicted_df$popFst_ARrawpred <- predict(ARraw_qm, predicted_df)
+predicted_df$popFst_ARrawpred2 <- predict(ARraw_lm, predicted_df)
+predicted_df$popFst_ARrarepred <- predict(ARrare_qm, predicted_df)
+predicted_df$popFst_ARrarepred2 <- predict(ARrare_lm, predicted_df)
+
+```
+
+
+```{r popFst vs AR and He plots}
+p1 <- ggplot(popFst_AR, aes(x = He, y = pop_Fst)) + 
+  geom_point() +
+  geom_line(color='red', data = predicted_df, aes(x=He, y=popFst_Hepredict)) +
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
+  labs(y ="pop-Fst", x = "Heterozygosity")
+
+p2 <- ggplot(popFst_AR, aes(x = AR_rare, y = pop_Fst)) + 
+  geom_point() +
+  geom_line(color='red', data = predicted_df, aes(x=AR_rare, y=popFst_ARrarepred)) +
+ # geom_line(color='red', data = predicted_df, aes(x=AR_rare, y=popFst_ARrarepred2)) +
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
+  labs(y ="pop-Fst", x = "Allelic richness")
+
+
+# p3 <- ggplot(popFst_AR, aes(x = AR_raw, y = pop_Fst)) + 
+#   geom_point() +
+#   geom_line(color='orange', data = predicted_df, aes(x=AR_raw, y=popFst_ARrawpred)) +
+#   geom_line(color='red', data = predicted_df, aes(x=AR_raw, y=popFst_ARrawpred2)) + 
+#   theme_bw() + 
+#   theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+#         panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
+#   ylab("pop-Fst")
+
+```
+
+
+```{r, include = F}
+# export plots
+png(paste0("plots/popFst_vs_He_", Sys.Date(), ".png"), width = 3, height = 4, units = 'in', res = 600)
+print(p1)
+dev.off()
+
+png(paste0("plots/popFst_vs_ARrare_", Sys.Date(), ".png"), width = 3, height = 4, units = 'in', res = 600)
+print(p2)
+dev.off()
+
+# png(paste0("plots/popFst_vs_ARraw_", Sys.Date(), ".png"), width = 3, height = 4, units = 'in', res = 300)
+# print(p3)
+# dev.off()
+
+# conclusion - quadratic model is better fit but fewer degrees of freedom means not significant
+```
+
+# IBD
+
+Details
+Currently pairwise Fst and D between populations and 1-propShared and Euclidean distance between individuals are implemented. Coordinates are expected as lat long and converted to Google Earth Mercator projection. 
+The function is based on the code provided by the adegenet tutorial (http://adegenet.r-forge.r-project.org/files/tutorial-basics.pdf)
+Pairwise relationship can be visualised via populations or individuals, depending which distance is calculated. Please note: Often a problem arises, if an individual based distance is calculated (e.g. propShared) and some individuals have identical coordinates as this results in distances of zero between those pairs of individuals. If the standard transformation [log(Dgeo)] is used, this results in an infinite value, because of trying to calculate'log(0)'. To avoid this, the easiest fix is to change the transformation from log(Dgeo) to log(Dgeo+1) or you could add some "noise" to the coordinates of the individuals (e.g. +- 1m, but be aware if you use lat lon then you rather want to add +0.00001 degrees or so).
+
+```{r IBD pops}
+# prep data
+# mappinggl@other$ind.metrics$l
+# mappinggl@other$latlon <- mappinggl@other$ind.metrics[,c("Lat",	"Long")]
+# names(mappinggl@other$latlon) <- c("lat", "lon")
+mappinggl_noSp <- popsub(mappinggl, exclude = "Spurgeon") %>% 
+  gl.recalc.metrics(., mono.rm = T, verbose = 0)
+
+# IBDpops <- gl.ibd(mappinggl, paircols = "pop", Dgen_trans = 'Dgen/(1-Dgen)', plot.out =T)
+# save_Rdata(x = IBDpops)
+
+# IBDpops_noSp <- gl.ibd(mappinggl_noSp, paircols = "pop", Dgen_trans = 'Dgen/(1-Dgen)', plot.out =T)
+# save_Rdata(x = IBDpops_noSp)
+
+# load(file = paste(Rflder, "IBD_test.Rdata", sep = "/"))
+```
+
+
+```{r IBD inds}
+
+# all samples
+#IBDinds <- gl.ibd(mappinggl, distance = 'propShared', Dgeo_trans =  "log(Dgeo+1)")
+IBDinds <- gl.ibd(mappinggl, distance = 'euclidean', Dgeo_trans =  "log(Dgeo+1)")
+
+# excluding Spurgeon  -LR only
+#IBDinds_noSp <- gl.ibd(mappinggl_noSp, distance = 'propShared', Dgeo_trans =  "log(Dgeo+1)")
+IBDinds_noSp <- gl.ibd(mappinggl_noSp, distance = 'euclidean', Dgeo_trans =  "log(Dgeo+1)")
+
+
+```
+
+### create and export IBD inds plots
+
+```{r}
+
+id_pop <- mappinggl$other$ind.metrics %>%
+  dplyr::select(id, pop)
+
+# convert from 
+IBDinds_df <- dist2list(IBDinds$Dgeo) %>%
+   dplyr::mutate(Dgeo_km = (exp(value) - 1)/1000) %>%  # inverse  log?
+   dplyr::rename(Dgeo_log = value)
+
+temp <- dist2list(IBDinds$Dgen)
+IBDinds_df <- IBDinds_df %>%
+   dplyr::mutate(Dgen = temp$value)
+
+
+
+IBDinds_df <- merge(IBDinds_df, id_pop,
+                    by.x = "col", by.y = "id") %>%
+  dplyr::rename(col_pop = pop)
+
+IBDinds_df <- merge(IBDinds_df, id_pop, 
+                    by.x = "row", by.y = "id") %>%
+   dplyr::rename(row_pop = pop)
+
+IBDinds_df %<>% 
+   dplyr::mutate(cat = paste(row_pop, col_pop, sep = "_"))
+cats <- unique(IBDinds_df$cat)
+
+#write_csv(cats)
+cats <- read.csv("output/cats.csv")
+
+IBDinds_df2 <- merge(IBDinds_df, cats, 
+                     by.x= "cat", by.y = "from") %>%
+  dplyr::select(-X, - cat) %>%
+   dplyr::rename(groups = to) %>%
+   dplyr::mutate(IsRoadkill = if_else(row=="Roadkill", T, col == "Roadkill"))
+
+
+#write_csv_if(IBDinds_df)
+
+IBDinds_plot_bygroup <- IBDinds_df2 %>%
+  ggplot(aes(x=Dgeo_log, y=Dgen, colour=`IsLR`, shape = `IsLR`)) +
+    geom_point(size=2,  alpha=0.07) +  #,
+  scale_colour_manual(values = c("salmon2", "darkslategrey")) +
+  scale_shape_manual(values=c(17,16)) +
+  geom_abline(size =0.75, aes(intercept=35,slope=2.3))+  # formula with Spurgeon
+  geom_abline(linetype ="dashed", size =0.75, aes(intercept=43,slope=1.3))+   # No spurgeon 
+  labs(x="Geographic distance ln(km)", y = "Euclidean genetic distance")+
+    theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
+ scale_x_continuous(breaks = seq(0, 12, by = 2), minor_breaks = 1:11) 
+
+
+print(IBDinds_plot_bygroup)
+
+ 
+
+# export IBD plot
+jpeg(paste0("plots/IBDinds_bygroup", Sys.Date(), ".jpg"), width = 8, height = 5, units = 'in', res = 600)
+print(IBDinds_plot_bygroup)
+dev.off()
+# 
+# 
+# jpeg(paste0("plots/IBDinds_all", Sys.Date(), ".jpg"), width = 10, height = 5, units = 'in', res = 600)
+# IBDinds_df2 %>%
+#   ggplot(aes(x=Dgeo_log, y=Dgen)) +
+#     geom_point(size=2, alpha=0.07) +  #,
+#   geom_abline(colour = "blue", size =0.75, aes(intercept=35,slope=2.3))+
+#   geom_abline( size =0.75, aes(intercept=43,slope=1.3))+ 
+#   labs(x="Geographic distance ln(km)", y = "Euclidean genetic distance")+
+#    theme_bw() + 
+#   theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+#         panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) 
+#     # theme(legend.position="none")
+# dev.off()
+
+# 
+# library(hrbrthemes)
+```
+
+```{r}
+
+IBDinds_plot_bygroup <- IBDinds_df2 %>%
+  ggplot(aes(x=Dgeo_log, y=Dgen, colour=`IsLR`, shape = `IsLR`)) +
+    geom_point(size=2,  alpha=0.07) +  #,
+  scale_colour_manual(values = c("salmon2", "aquamarine4")) +
+  scale_shape_manual(values=c(18,16)) +
+  geom_abline(size =0.75, aes(intercept=35,slope=2.3))+  # formula with Spurgeon
+  geom_abline(linetype ="dashed", size =0.75, aes(intercept=43,slope=1.3))+   # No spurgeon 
+  labs(x="Geographic distance ln(km)", y = "Euclidean genetic distance")+
+  #  theme_bw() + 
+  # theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+  #       panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
+ scale_x_continuous(breaks = seq(0, 12, by = 2), minor_breaks = 1:11) 
+
+
+print(IBDinds_plot_bygroup)
+
+```
+
+
+
+```{r}
+# show roadkill
+
+# IBDinds_df2 %>%
+#   ggplot(aes(x=Dgeo_log, y=Dgen,  colour= `IsRoadkill`)) +
+#     geom_point(size=2) +  # alpha= c(0.1, 0.01) 
+#    scale_colour_manual(values = c("black", "red")) +
+#   # geom_abline(colour="salmon2", size =0.75, aes(intercept=35,slope=2IBDinds_bygroup.3))+
+#   # geom_abline(size =0.75, aes(intercept=43,slope=1.3))+   # No spurgeon 
+#   labs(x="Geographic distance ln(km)", y = "Euclidean genetic distance")+
+#    theme_bw() + 
+#   theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+#         panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) 
+#     # theme(legend.position="none")
+
+IBDinds_df2 <- IBDinds_df2 %>%
+  mutate(rk_grps = if_else(IsRoadkill, groups, "z not roadkill"))
+  #filter(IsRoadkill)
+IBD_roadkill <- IBDinds_df2 %>%
+  filter(IsRoadkill)
+
+
+IBD_roadkill %>%
+  ggplot(aes(x=Dgeo_log, y=Dgen, colour = rk_grps)) +
+    geom_point(alpha=0.5, size=2) +  #,
+   #ggplot(IBD_roadkill, aes(x=Dgeo_log, y=Dgen, colour=`rk_grps`)) +
+   #ggplot(aes(x=Dgeo_log, y=Dgen,  colour=`rk_grps`)) +
+    #geom_point(aes(x=IBD_roadkill$Dgeo_log, y=IBD_roadkill$Dgen, colour = IBD_roadkill$rk_grps), size=2, alpha=0.1) +  #,
+  # scale_colour_manual(values = c("salmon2", "blue")) +
+  # geom_abline(colour="salmon2", size =0.75, aes(intercept=35,slope=2.3))+
+  # geom_abline(size =0.75, aes(intercept=43,slope=1.3))+   # No spurgeon 
+  labs(x="Geographic distance ln(km)", y = "Euclidean genetic distance")+
+   theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) 
+
+
+  #filter(IsRoadkill)# IBDinds_noSp_df <- dist2list(IBDinds_noSp$Dgeo)
+# IBDinds_noSp_df <- IBDinds_noSp_df %>%
+#   mutate(Dgeo_km = (exp(value) - 1)/1000)
+# 
+# temp <- dist2list(IBDinds_noSp$Dgen)
+# IBDinds_noSp_df <- IBDinds_noSp_df %>%
+#   mutate(Dgen_propShared = temp$value)
+```
+
+# combined results tables
+```{r}
+
+# export results tables
+
+# by pop
+# all have been ordered to correct pop order so can cbind instead of merge
+outAR <- Avg_AlleleRich_rareboot %>% 
+  dplyr::select(Population, mean_rareAR, min_rareA, max_rareA)
+# print(outAR)
+
+outH <- HetPop %>% 
+  mutate(Population = factor(pop, levels = .env$Population)) %>% 
+  arrange(Population) %>% 
+  dplyr::select(nInd, Ho:HoSD, He:HeSD, FIS)
+# print(outH)
+  
+outhwe <- hwe %>% 
+  dplyr::select(count_polyLoc_Sig, total_polyLoc) %>% 
+  mutate(perc_sigLoc = count_polyLoc_Sig / total_polyLoc)
+# print(outhwe)
+
+outSI <- q_alpha_l %>% 
+  filter(scale == "H" & q_level == 1) %>% 
+  mutate(pop = factor(pop, levels = .env$Population2)) %>% 
+  arrange(pop) %>% 
+  dplyr::select(-c(scale, q_level, pop)) %>% 
+  rename(SI = alpha, SI_se = se, SI_sd = sd)
+# print(outSI)
+
+outNe <- Ne_metapop %>% 
+  mutate(Population = factor(Population, levels = .env$Population)) %>% 
+  arrange(Population) %>% 
+  dplyr::select(Ne_adj, JackknifeCI_min.adj, JackknifeCI_max.adj)
+# print(outNe)
+  
+
+outNe_local <- Ne_local %>% 
+  mutate(Population = factor(Population, levels = .env$Population)) %>% 
+  arrange(Population) %>% 
+  dplyr::select(Ne_adj, JackknifeCI_min.adj, JackknifeCI_max.adj)
+# print(outNe_local)
+
+outpopFst <- popFst_AR %>% 
+  dplyr::select(popFst2, popFst2_SE)
+# print(outpopFst)
+
+
+Resultsdf_pop <- cbind.data.frame(outAR, outH, outSI, outNe, outhwe, outpopFst) %>% 
+  mutate(across(where(is.double), round, 3)) %>% 
+  relocate(Population, nInd)
+
+Resultsdf_pop2 <- Resultsdf_pop %>% 
+  mutate(`AR (bootstrap range)` = paste0(mean_rareAR, " (",round(min_rareA,2), "-", round(max_rareA, 2), ")"), # losing precisison here becasue rounding twice
+         `Ho (SD)` = paste0(Ho, " (", HoSD, ")"),
+         `He (SD)` = paste0(He, " (", HeSD, ")"),
+         `SI (SD)` = paste0(SI, " (", SI_se, ")"),
+         `NeLD (jkCI)` = paste0(round(Ne_adj, 0), " (", round(JackknifeCI_min.adj,0), "-", round(JackknifeCI_max.adj, 0), ")"),
+         VarLoci = total_polyLoc,
+         SigHWE = perc_sigLoc,
+         FIS = FIS,
+         `pop-Fst (SE)` = paste0(popFst2, " (", popFst2_SE, ")"))  
+
+print(Resultsdf_pop2)
+write_csv(Resultsdf_pop2)
+
+```
+
+
+```{r}
+# pop*pop
+#  symmetrical comparisons are ordered on pairwise distance
+outpopkm <- IBDinds_df2 %>% 
+  filter(!IsRoadkill) %>% 
+  dplyr::group_by(groups) %>% 
+  summarise(Geo_dist_km = round(mean(Dgeo_km), 1)) %>% 
+  arrange(Geo_dist_km) %>% 
+  filter(groups != "within_pop") %>% 
+  dplyr::select(-groups)
+print(outpopkm)
+
+outGst <- Gstl %>% 
+  rename(Gst = value) %>% 
+  arrange(Gst) %>% 
+  dplyr::select(Gst)
+print(outGst)
+
+#Fst_Results
+outpriv <- PrivFix_rareboot_summ %>% 
+  arrange(mean_AFD) %>% 
+  mutate(Fixed_perc = mean_fixed / nLoc(mappinggl),
+         Priv1_perc = mean_priv1 / nLoc(mappinggl),
+         Priv2_perc = mean_priv2 / nLoc(mappinggl)) %>% 
+  dplyr::select(pop1, pop2, Fixed_perc, Priv1_perc, Priv2_perc, mean_AFD)
+print(outpriv)  
+
+
+Resultsdf_popXpop <- cbind.data.frame(outpriv, outpopkm, outGst) %>% 
+  mutate(across(where(is.double), round, 3)) %>% 
+  relocate(1:2, Geo_dist_km, Fixed_perc:mean_AFD,Gst)
+  
+print(Resultsdf_popXpop)
+
+write_csv(Resultsdf_popXpop)
+
+```
+
+# The End!
+```{r}
+#Save
+
+file.copy(from = "dartR_notebook2.nb.html", to = paste(Rflder, paste0("dartR_notebook2_", Sys.Date(), ".nb.html" ), sep ="/"), copy.date = FALSE, overwrite = T)
+
+cat(paste0("\n dartR_notebook2 finished running at ", Sys.time()))
+
+
+```
+  
+  
+  

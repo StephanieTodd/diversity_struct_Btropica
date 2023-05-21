@@ -1,0 +1,40 @@
+---
+title: "Instructions for DArT-R bettong population genetics analysis"
+output: html_notebook
+---
+
+# Instructions
+
+1) Quality control = scripts/01_QC2.R'
+2) Main script = 'dartR_notebook2.Rmd' Most of the analysis is done here
+
+'controller.R' allows main script to be called externally (without opening up .Rmd file) 
+
+running 'dartR_notebook2.Rmd' requires:
+- genlight dataset  'Rdata[datversion]/mappinggl[datversion].Rdata'  produced from '01_QC2.R' 
+- "02_global_variables_dartR.R"
+- "Functions_dartR_notebook.R" (this is main function file)
+- various other functions in "functions" folder
+- output from 'Ne_Estimator' software...
+  
+  
+Ne_Estimator must be run separetely!!
+ * to estimate r2 (Linkage Disequilibrium) and do most of Ne calculations 
+ * everything is in  'Ne_Estimator' directory
+ * genlight data must be first converted into genid 'gi' format
+ * then use (dont just source!) 'gi2genpop.R' to convert and export data to genepop format required by Ne Estimator (saved to .gen files)
+ * now run NeLR with the following paremeters:
+    * 'output files in tabular format for top 3 crit values' box checked to create 'LDxLD.txt' output.
+    * uncheck methods other than NeLD
+    * use critical values = 0.01,0.02,0.05
+    * uncheck 'also run without frequency restriction'
+    * >>> run
+  * then: open up LDxLD text files and copy down to fill columns one & two e.g. "1:3_18/11/16    75"
+
+
+SambaR also run separately, with separate .Rproj
+'SambaR/scripts/SambaR2.R' is main analysis file
+
+
+### DATA
+'indvidual_metadata_6213_v3.csv' is the latest
